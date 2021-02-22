@@ -10,9 +10,7 @@
 #include <string_view>
 #include <vector>
 
-
-
-namespace sqlsqrt {
+namespace sqlplusplus {
 
 class OracleException : public std::runtime_error {
 public:
@@ -248,4 +246,4 @@ private:
 };
 
 
-} // namespace sqlsqrt
+} // namespace sqlplusplus

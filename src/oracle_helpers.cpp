@@ -3,7 +3,7 @@
 #include <stdexcept>
 #include <string_view>
 
-namespace sqlsqrt {
+namespace sqlplusplus {
 
 OracleException::OracleException(dpiErrorInfo info, std::string context)
     : std::runtime_error(std::string(info.message, info.messageLength)),
@@ -479,4 +479,4 @@ std::string_view OracleData::as<std::string_view>() const {
     return std::string_view(bytes->ptr, bytes->length);
 }
 
-} // namespace sqlsqrt
+} // namespace sqlplusplus

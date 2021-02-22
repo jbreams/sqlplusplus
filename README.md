@@ -1,1 +1,1 @@
-sqlsqrt is an experimental CLI for the Oracle Database
+sqlplusplus is an experimental CLI for the Oracle Database

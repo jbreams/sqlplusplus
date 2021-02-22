@@ -17,7 +17,7 @@
 #include <string_view>
 #include <unordered_map>
 
-using namespace sqlsqrt;
+using namespace sqlplusplus;
 
 void print_usage(std::string_view program_name)
 {
@@ -43,6 +43,15 @@ struct LinenoiseFreeHelper {
     const T* ptr;
 };
 
+struct LinenoiseMaskGuard {
+    LinenoiseMaskGuard() noexcept {
+        linenoiseMaskModeEnable();
+    }
+    ~LinenoiseMaskGuard() noexcept {
+        linenoiseMaskModeDisable();
+    }
+};
+
 bool fetchAndPrintResults(OracleStatement& stmt, int maxResults) {
     if (!stmt.fetch()) {
         std::cout << "No rows returned" << std::endl;
@@ -60,7 +69,7 @@ bool fetchAndPrintResults(OracleStatement& stmt, int maxResults) {
     table.add_row(columnNames);
     table.row(0).format().font_style({tabulate::FontStyle::bold});
 
-    int resCounter = 0;
+    int resCounter = 1;
     bool wasExhaused = false;
     while(resCounter < maxResults) {
         std::vector<std::variant<std::string, const char*, tabulate::Table>> rowValues;
@@ -154,12 +163,23 @@ int main(int argc, const char** argv) try {
     CliArgument connStringArg(argParser, "connectionString", 'c');
     CliArgument usernameArg(argParser, "username", 'u');
     CliArgument passwordarg(argParser, "password", 'p');
+    CliArgument historyFileArg(argParser, "historyFile");
+    CliArgument historyMaxSizeArg(argParser, "maxHistorySize");
     CliFlag helpFlag(argParser, "help", 'h');
 
     auto res = argParser.parse(argc, argv);
 
     if (helpFlag) {
         print_usage(res.program_name);
+    }
+
+    std::string historyPath;
+    if (historyFileArg) {
+        historyPath = historyFileArg.as<std::string>();
+        linenoiseHistoryLoad(historyPath.c_str());
+    } else if (auto homeVar = ::getenv("HOME"); homeVar != nullptr) {
+        historyPath = fmt::format("{}/.sqlplusplus_history", homeVar);
+        linenoiseHistoryLoad(historyPath.c_str());
     }
 
     auto oracleCtx = OracleContext::make();
@@ -169,11 +189,17 @@ int main(int argc, const char** argv) try {
     if (passwordarg) {
         connOpts.password = passwordarg.as<std::string>();
     } else {
-        linenoiseMaskModeEnable();
+        LinenoiseMaskGuard maskGuard;
         auto linenoisePtr = linenoise("Password > ");
         LinenoiseFreeHelper freeHelper(linenoisePtr);
         connOpts.password = std::string(linenoisePtr);
-        linenoiseMaskModeDisable();
+    }
+
+    if (historyMaxSizeArg) {
+        linenoiseHistorySetMaxLen(historyMaxSizeArg.as<int64_t>());
+    } else {
+        // Make history really big by default
+        linenoiseHistorySetMaxLen(10000);
     }
 
     auto oracleConn = OracleConnection::make(oracleCtx.get(), connOpts);
@@ -181,7 +207,7 @@ int main(int argc, const char** argv) try {
     std::stringstream lineBuilder;
     bool inMultLine = false;
     for(;;) {
-        auto linePtr = linenoise(inMultLine ? "SQLsqrt (cont.) > " : "SQLsqrt > ");
+        auto linePtr = linenoise(inMultLine ? "SQL++ (cont.) > " : "SQL++ > ");
         if (linePtr == nullptr) {
             break;
         }
@@ -202,6 +228,10 @@ int main(int argc, const char** argv) try {
         auto fullLine = lineBuilder.str();
         lineBuilder = std::stringstream{};
 
+        if (fullLine.empty()) {
+            continue;
+        }
+
         if (fullLine == ".exit") {
             break;
         } else if (fullLine == ".it") {
@@ -217,6 +247,7 @@ int main(int argc, const char** argv) try {
         } else if (fullLine.find(kDescribeKeyword) == 0) {
             auto table_name = fullLine.substr(kDescribeKeyword.size());
             describeTable(oracleConn, table_name);
+            linenoiseHistoryAdd(fullLine.c_str());
             continue;
         }
 
@@ -229,6 +260,10 @@ int main(int argc, const char** argv) try {
         } catch(const OracleException& e) {
             std::cerr << "Error " << e.context() << ": " << e.what() << std::endl;
         }
+    }
+
+    if (!historyPath.empty()) {
+        linenoiseHistorySave(historyPath.c_str());
     }
 
     return 0;

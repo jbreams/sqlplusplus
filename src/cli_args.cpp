@@ -3,7 +3,7 @@
 #include <cerrno>
 #include <string>
 
-namespace sqlsqrt {
+namespace sqlplusplus {
 
 CliArgumentParser::ParseResult CliArgumentParser::parse(int argc, const char** argv)
 {
@@ -76,4 +76,4 @@ int64_t CliArgument::as<int64_t>() const
     return val;
 }
 
-} // namespace sqlsqrt
+} // namespace sqlplusplus

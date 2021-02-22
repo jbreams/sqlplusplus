@@ -1,7 +1,7 @@
 #include <vector>
 #include <string_view>
 
-namespace sqlsqrt {
+namespace sqlplusplus {
 
 class CliFlag;
 class CliArgumentParser {
@@ -97,4 +97,4 @@ class CliParseException : public std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-} // namespace sqlsqrt
+} // namespace sqlplusplus
