@@ -7,7 +7,10 @@
 #include "linenoise.h"
 #include "tabulate/font_style.hpp"
 #include "tabulate/table.hpp"
+#include "tsl/htrie_set.h"
 
+#include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -52,6 +55,8 @@ struct LinenoiseMaskGuard {
     }
 };
 
+std::function<std::vector<std::string>(std::string_view cmd)> generateCompletions;
+
 bool fetchAndPrintResults(OracleStatement& stmt, int maxResults) {
     if (!stmt.fetch()) {
         std::cout << "No rows returned" << std::endl;
@@ -59,19 +64,18 @@ bool fetchAndPrintResults(OracleStatement& stmt, int maxResults) {
     }
     tabulate::Table table;
     
-    std::vector<size_t> columnWidths;
     std::vector<std::variant<std::string, const char*, tabulate::Table>> columnNames;
     for (int idx = 1; idx <= stmt.numColumns(); ++idx) {
         auto colInfo = stmt.getColumnInfo(idx);
         columnNames.push_back(std::string{colInfo.name()});
-        columnWidths.push_back(colInfo.name().size());
     }
     table.add_row(columnNames);
     table.row(0).format().font_style({tabulate::FontStyle::bold});
 
-    int resCounter = 1;
-    bool wasExhaused = false;
-    while(resCounter < maxResults) {
+    int resCounter = 0;
+    bool moreResults = true;
+    while(resCounter < maxResults && moreResults) {
+        resCounter++;
         std::vector<std::variant<std::string, const char*, tabulate::Table>> rowValues;
         std::set<int> nulColumns;
         for (auto col = 1; col <= stmt.numColumns(); ++col) {
@@ -116,7 +120,6 @@ bool fetchAndPrintResults(OracleStatement& stmt, int maxResults) {
             default:
                 colValueStr = "unsupported type";
             }
-            columnWidths[col - 1] = std::max(columnWidths[col - 1], colValueStr.size());
             rowValues.push_back(colValueStr);
         }
         table.add_row(rowValues);
@@ -124,14 +127,10 @@ bool fetchAndPrintResults(OracleStatement& stmt, int maxResults) {
             table.row(resCounter + 1).cell(col).format().font_style({tabulate::FontStyle::italic});
         }
 
-        if (!stmt.fetch()) {
-            wasExhaused = true;
-            break;
-        }
-        resCounter++;
+        moreResults = stmt.fetch();
     }
     std::cout << table << "\nFetched " << resCounter << " rows" << std::endl;
-    return wasExhaused;
+    return moreResults;
 }
 
 void describeTable(OracleConnection& conn, std::string_view tableName) {
@@ -154,6 +153,21 @@ void describeTable(OracleConnection& conn, std::string_view tableName) {
     describeStatement.bindByPos(1, var);
     describeStatement.execute();
     fetchAndPrintResults(describeStatement, std::numeric_limits<int>::max());
+}
+
+tsl::htrie_set<char> populateReservedKeywords(OracleConnection& conn) {
+    constexpr static std::string_view selectKeywordsStmtStr
+        ("select lower(KEYWORD) from V$RESERVED_WORDS where LENGTH(KEYWORD) > 1");
+
+    auto selectKeywordsStmt = conn.prepareStatement(selectKeywordsStmtStr);
+    selectKeywordsStmt.execute();
+    tsl::htrie_set<char> out;
+    while (selectKeywordsStmt.fetch()) {
+        auto valueFromDB = selectKeywordsStmt.getColumnValue(1).as<std::string_view>();
+        out.insert(valueFromDB);
+    }
+
+    return out;
 }
 
 constexpr static std::string_view kDescribeKeyword(".describe ");
@@ -202,7 +216,42 @@ int main(int argc, const char** argv) try {
         linenoiseHistorySetMaxLen(10000);
     }
 
+    linenoiseSetCompletionCallback([](const char* strPtr, linenoiseCompletions* lc) {
+        if (!generateCompletions) {
+            return;
+        }
+
+        for (const auto& completion : generateCompletions(std::string_view(strPtr))) {
+            linenoiseAddCompletion(lc, completion.c_str());
+        }
+    });
+
     auto oracleConn = OracleConnection::make(oracleCtx.get(), connOpts);
+    auto reservedKeywords = populateReservedKeywords(oracleConn);
+    generateCompletions = [&](std::string_view sv) -> std::vector<std::string> {
+        std::vector<std::string> ret;
+
+        if (sv.empty()) {
+            return ret;
+        }
+
+        auto lastWordBoundary = sv.find_last_of(" (),.@");
+        if (lastWordBoundary == std::string_view::npos || lastWordBoundary == sv.size()) {
+            lastWordBoundary = 0;
+        } else {
+            ++lastWordBoundary;
+        }
+
+        std::string_view lastWord = sv.substr(lastWordBoundary);
+
+        auto prefixRange = reservedKeywords.equal_prefix_range(lastWord);
+        for (auto it = prefixRange.first; it != prefixRange.second; ++it) {
+            ret.push_back(fmt::format("{}{}", sv.substr(0, lastWordBoundary), it.key()));
+        }
+
+        return ret;
+    };
+
     std::optional<OracleStatement> activeStatement;
     std::stringstream lineBuilder;
     bool inMultLine = false;
@@ -256,7 +305,7 @@ int main(int argc, const char** argv) try {
             activeStatement->execute();
             linenoiseHistoryAdd(fullLine.c_str());
             fetchAndPrintResults(*activeStatement, 20);
-
+            oracleConn.commit();
         } catch(const OracleException& e) {
             std::cerr << "Error " << e.context() << ": " << e.what() << std::endl;
         }

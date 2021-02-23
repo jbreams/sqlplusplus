@@ -156,6 +156,7 @@ public:
     ~OracleConnection();
 
     OracleStatement prepareStatement(std::string_view sql);
+    void commit();
 
     struct VariableOpts {
         struct ByteBufferOpts {

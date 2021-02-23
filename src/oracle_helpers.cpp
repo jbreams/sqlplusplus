@@ -393,6 +393,11 @@ void OracleStatement::execute() {
     checkErr(rc, _ctx, "error executing oracle statement");
 }
 
+void OracleConnection::commit() {
+    auto rc = dpiConn_commit(_conn);
+    checkErr(rc, _ctx, "error committing changes");
+}
+
 bool OracleStatement::fetch() {
     int found = 0;
     uint32_t bufferRowIndex;
