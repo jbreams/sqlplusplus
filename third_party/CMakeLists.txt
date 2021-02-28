@@ -1,4 +1,3 @@
-add_subdirectory(tabulate-1.4)
 add_subdirectory(variant-1.4.0)
 add_subdirectory(fmt-7.1.3)
 add_subdirectory(hat-trie-0.6.0)

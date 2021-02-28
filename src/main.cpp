@@ -2,11 +2,10 @@
 #include "cli_args.h"
 #include "dpi.h"
 #include "oracle_helpers.h"
+#include "table.h"
 
 #include "fmt/format.h"
 #include "linenoise.h"
-#include "tabulate/font_style.hpp"
-#include "tabulate/table.hpp"
 #include "tsl/htrie_set.h"
 
 #include <algorithm>
@@ -62,21 +61,19 @@ bool fetchAndPrintResults(OracleStatement& stmt, int maxResults) {
         std::cout << "No rows returned" << std::endl;
         return false;
     }
-    tabulate::Table table;
+    Table table(stmt.numColumns());
     
-    std::vector<std::variant<std::string, const char*, tabulate::Table>> columnNames;
+    table.addRow();
     for (int idx = 1; idx <= stmt.numColumns(); ++idx) {
         auto colInfo = stmt.getColumnInfo(idx);
-        columnNames.push_back(std::string{colInfo.name()});
+        table.setColumnValue(0, idx - 1, colInfo.name());
     }
-    table.add_row(columnNames);
-    table.row(0).format().font_style({tabulate::FontStyle::bold});
 
     int resCounter = 0;
     bool moreResults = true;
     while(resCounter < maxResults && moreResults) {
         resCounter++;
-        std::vector<std::variant<std::string, const char*, tabulate::Table>> rowValues;
+        auto rowIdx = table.addRow();
         std::set<int> nulColumns;
         for (auto col = 1; col <= stmt.numColumns(); ++col) {
             auto colValue = stmt.getColumnValue(col);
@@ -120,16 +117,18 @@ bool fetchAndPrintResults(OracleStatement& stmt, int maxResults) {
             default:
                 colValueStr = "unsupported type";
             }
-            rowValues.push_back(colValueStr);
+            table.setColumnValue(rowIdx, col - 1, colValueStr);
         }
-        table.add_row(rowValues);
+        /*
         for (const auto& col: nulColumns) {
             table.row(resCounter + 1).cell(col).format().font_style({tabulate::FontStyle::italic});
-        }
+        }*/
 
         moreResults = stmt.fetch();
     }
-    std::cout << table << "\nFetched " << resCounter << " rows" << std::endl;
+
+    table.render(std::cout);
+    std::cout << "Fetched " << resCounter << " rows" << std::endl;
     return moreResults;
 }
 
