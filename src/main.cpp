@@ -7,14 +7,17 @@
 #include "fmt/format.h"
 #include "linenoise.h"
 #include "tsl/htrie_set.h"
+#include "tsl/htrie_map.h"
 
 #include <algorithm>
 #include <cctype>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -132,35 +135,128 @@ bool fetchAndPrintResults(OracleStatement& stmt, int maxResults) {
     return moreResults;
 }
 
-void describeTable(OracleConnection& conn, std::string_view tableName) {
-    OracleConnection::VariableOpts varopts;
-    varopts.dbTypeNum = DPI_ORACLE_TYPE_CHAR;
-    varopts.nativeTypeNum = DPI_NATIVE_TYPE_BYTES;
-    varopts.opts = OracleConnection::VariableOpts::ByteBufferOpts{
-        static_cast<uint32_t>(tableName.size()), false};
-    varopts.maxArraySize = 1;
-    auto var = conn.newArrayVariable(varopts);
-    var.setFrom(0, tableName);
-
-    constexpr auto describeStmtStr = \
-        "select column_name as \"Name\", "
-        "nullable as \"Null?\", "
-        "concat(concat(concat(data_type,'('),data_length),')') as \"Type\" "
-        "from all_tab_columns where table_name = :1";
-
-    auto describeStatement = conn.prepareStatement(describeStmtStr);
-    describeStatement.bindByPos(1, var);
-    describeStatement.execute();
-    fetchAndPrintResults(describeStatement, std::numeric_limits<int>::max());
+class Command;
+tsl::htrie_map<char, Command*>& getCommandMap() {
+    static tsl::htrie_map<char, Command*> globalMap;
+    return globalMap;
 }
 
+class Command {
+public:
+    virtual ~Command() = default;
+
+    explicit Command(std::string_view name)
+    {
+        getCommandMap().insert(name, this);
+    }
+
+    virtual std::string_view name() const noexcept = 0;
+    virtual bool run(OracleConnection& conn, std::string_view cmdLine) = 0;
+};
+
+class DescribeCommand : public Command {
+public:
+    constexpr static auto kName = std::string_view(".describe");
+    DescribeCommand() : Command(kName) {}
+
+    std::string_view name() const noexcept override {
+        return kName;
+    }
+
+    bool run(OracleConnection& conn, std::string_view tableName) override {
+        if (tableName.empty()) {
+            throw std::runtime_error("describe command requires a table name");
+        }
+        OracleConnection::VariableOpts varopts;
+        varopts.dbTypeNum = DPI_ORACLE_TYPE_CHAR;
+        varopts.nativeTypeNum = DPI_NATIVE_TYPE_BYTES;
+        varopts.opts = OracleConnection::VariableOpts::ByteBufferOpts{
+            static_cast<uint32_t>(tableName.size()), false};
+        varopts.maxArraySize = 1;
+        auto var = conn.newArrayVariable(varopts);
+
+        std::string tableNameUpper;
+        tableNameUpper.reserve(tableName.size());
+        std::transform(
+                tableName.begin(),
+                tableName.end(),
+                std::back_inserter(tableNameUpper),
+                [](const auto ch) {
+            return std::toupper(ch);
+        });
+
+        var.setFrom(0, tableNameUpper);
+
+        constexpr auto describeStmtStr = \
+            "select column_name as \"Name\", "
+            "nullable as \"Null?\", "
+            "concat(concat(concat(data_type,'('),data_length),')') as \"Type\" "
+            "from all_tab_columns where table_name = :1";
+
+        auto describeStatement = conn.prepareStatement(describeStmtStr);
+        describeStatement.bindByPos(1, var);
+        describeStatement.execute();
+        fetchAndPrintResults(describeStatement, std::numeric_limits<int>::max());
+
+        return true;
+    }
+} cmdDescribe;
+
+class ExitCommand : public Command {
+public:
+    constexpr static auto kName = std::string_view(".exit");
+    ExitCommand() : Command(kName) {}
+
+    std::string_view name() const noexcept override {
+        return kName;
+    }
+
+    bool run(OracleConnection& conn, std::string_view cmdLine) override {
+        return false;
+    }
+} cmdExit;
+
+
+class MoreRowsCommand : public Command {
+public:
+    constexpr static auto kName = std::string_view(".moreRows");
+    MoreRowsCommand() : Command(kName) {}
+
+    std::string_view name() const noexcept override {
+        return kName;
+    }
+
+    bool run(OracleConnection& conn, std::string_view cmdLine) override {
+        if (!_activeStatement) {
+            std::cout << "No active statement" << std::endl;
+            return true;
+        }
+
+        if (!fetchAndPrintResults(*_activeStatement, 20)) {
+            _activeStatement = std::nullopt;
+        }
+        return true;
+    }
+
+    void setActiveStatement(OracleStatement stmt) {
+        _activeStatement = std::move(stmt);
+    }
+
+private:
+    std::optional<OracleStatement> _activeStatement;
+} moreRowsCmd;
+
 tsl::htrie_set<char> populateReservedKeywords(OracleConnection& conn) {
+    tsl::htrie_set<char> out;
+    for (const auto& cmdName: getCommandMap()) {
+        out.insert(cmdName->name());
+    }
+
     constexpr static std::string_view selectKeywordsStmtStr
         ("select lower(KEYWORD) from V$RESERVED_WORDS where LENGTH(KEYWORD) > 1");
 
     auto selectKeywordsStmt = conn.prepareStatement(selectKeywordsStmtStr);
     selectKeywordsStmt.execute();
-    tsl::htrie_set<char> out;
     while (selectKeywordsStmt.fetch()) {
         auto valueFromDB = selectKeywordsStmt.getColumnValue(1).as<std::string_view>();
         out.insert(valueFromDB);
@@ -168,8 +264,6 @@ tsl::htrie_set<char> populateReservedKeywords(OracleConnection& conn) {
 
     return out;
 }
-
-constexpr static std::string_view kDescribeKeyword(".describe ");
 
 int main(int argc, const char** argv) try {
     CliArgumentParser argParser;
@@ -235,7 +329,7 @@ int main(int argc, const char** argv) try {
         }
 
         auto lastWordBoundary = sv.find_last_of(" (),.@");
-        if (lastWordBoundary == std::string_view::npos || lastWordBoundary == sv.size()) {
+        if (lastWordBoundary == std::string_view::npos || lastWordBoundary == sv.size() || lastWordBoundary == 0) {
             lastWordBoundary = 0;
         } else {
             ++lastWordBoundary;
@@ -280,31 +374,37 @@ int main(int argc, const char** argv) try {
             continue;
         }
 
-        if (fullLine == ".exit") {
-            break;
-        } else if (fullLine == ".it") {
-            if (!activeStatement) {
-                std::cout << "No active statement" << std::endl;
-                continue;
+        const auto& commandMap = getCommandMap();
+        if (auto cmdIt = commandMap.longest_prefix(fullLine); cmdIt != commandMap.end()) {
+            auto commandName = cmdIt.value()->name();
+            size_t prefixEnd = 0;
+            auto checkPrefix = [&] {
+                if (prefixEnd == fullLine.size() || prefixEnd == commandName.size()) {
+                    return false;
+                }
+                return fullLine.at(prefixEnd) == commandName.at(prefixEnd);
+            };
+
+            for (; checkPrefix(); ++prefixEnd);
+            if (prefixEnd < fullLine.size()) {
+                auto afterSpaces = fullLine.substr(prefixEnd).find_first_not_of(" ");
+                if (afterSpaces != std::string_view::npos) {
+                    prefixEnd += afterSpaces;
+                }
             }
 
-            if (!fetchAndPrintResults(*activeStatement, 20)) {
-                activeStatement = std::nullopt;
+            if (!cmdIt.value()->run(oracleConn, fullLine.substr(prefixEnd))) {
+                break;
             }
-            continue;
-        } else if (fullLine.find(kDescribeKeyword) == 0) {
-            auto table_name = fullLine.substr(kDescribeKeyword.size());
-            describeTable(oracleConn, table_name);
-            linenoiseHistoryAdd(fullLine.c_str());
             continue;
         }
 
         try {
-            activeStatement = oracleConn.prepareStatement(fullLine);
-            activeStatement->execute();
+            auto activeStatement = oracleConn.prepareStatement(fullLine);
+            activeStatement.execute();
             linenoiseHistoryAdd(fullLine.c_str());
-            fetchAndPrintResults(*activeStatement, 20);
-            oracleConn.commit();
+            fetchAndPrintResults(activeStatement, 20);
+            moreRowsCmd.setActiveStatement(std::move(activeStatement));
         } catch(const OracleException& e) {
             std::cerr << "Error " << e.context() << ": " << e.what() << std::endl;
         }
